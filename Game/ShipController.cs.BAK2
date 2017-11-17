@@ -1,0 +1,584 @@
+﻿using System.Collections;
+using System.Collections.Generic;
+using UnityEngine;
+
+public class ShipController : MonoBehaviour
+{
+	private enum eShipAttackFrontalState
+	{
+		Engage,
+		FallBack,
+	}
+
+	private enum eShipAttackBroadsideState
+	{
+		Engage,
+		Strafe
+	}
+
+	private struct ShipMover
+	{
+		public int id;										// 4	4
+		public bool isAlive;								// 1	5
+		public int team;									// 4	9
+		public Vector3 position;							// 12	21
+		public Vector3 velocity;							// 12	33
+		public Vector3 destination;							// 12	45
+		public Quaternion rotation;							// 16	61
+		public float acceleration;							// 4	65
+		public float maxSpeed;								// 4	69
+		public float targetY;								// 4	73
+		public float turnSpeed;                             // 4	77
+		public float turnSpeedMultiplier;                   // 4	81
+		public float range;                                 // 4	85
+		public bool stop;									// 1	86
+
+		public eManouverType order;							// 4	90
+		public eShipAttackFrontalState frontalState;		// 4	94
+		public eShipAttackBroadsideState broadsideState;	// 4	98
+		public int targetId;								// 4	102
+		public List<ShipOrder> orders;						// ??	??
+	}
+
+	private ShipMover[] myMovers;
+	private Ship[] myShips;
+
+	private int myNumberOfShips;
+
+	public float centerThing = 1000.0f;
+	public float turnSpeed = 65.0f;
+	public float speedMultiplier = 3.0f;
+	public float turnMultiplier = 4.0f;
+	public float engageRadius = 150.0f;
+	public float fallbackRadius = 30.0f;
+	public float maxY = 20.0f;
+	public float engangementRange = 90000.0f;
+
+	public bool showDirectionToTarget = true;
+	public bool showTargetDirection = true;
+	public bool showSteering = true;
+
+	public Texture2D shipIndicator;
+	public Texture2D shipIndicatorScreen;
+	public Texture2D shipIndicatorDestroyer;
+	public Texture2D shipIndicatorBattle;
+
+	private const float INTERNAL_DELTA_TIME = 0.02f;
+
+	public void Init()
+	{
+		myShips = FindObjectsOfType<Ship>();
+		myNumberOfShips = myShips.Length;
+		myMovers = new ShipMover[myNumberOfShips];
+		InitPositions();
+	}
+
+	private void InitPositions()
+	{
+		for (int i = 0; i < myNumberOfShips; ++i)
+		{
+			ShipMover mover = new ShipMover();
+			mover.id = i;
+			mover.isAlive = true;
+			mover.team = 0;
+			mover.position = myShips[i].transform.position;
+			//mover.position.y = Random.Range(-maxY, maxY);
+			mover.velocity = Vector3.zero;
+			//mover.velocity = Random.onUnitSphere;
+			//mover.velocity.y = 0.0f;
+			//mover.velocity = mover.velocity.normalized;
+			mover.destination = mover.position;
+			mover.rotation = myShips[i].transform.rotation;
+			mover.acceleration = 3.0f;
+			//mover.maxSpeed = myShips[i].Data.baseData.speed;
+			mover.maxSpeed = GetMaxSpeed(i);
+			mover.targetY = Random.Range(-maxY, maxY);
+			mover.turnSpeed = myShips[i].Data.baseData.turnRate;
+			mover.turnSpeedMultiplier = 10.0f;
+			mover.range = myShips[i].Data.baseData.firingRange * 2.0f;
+			mover.stop = false;
+			mover.team = myShips[i].TeamIndex;
+			mover.order = eOrderType.None;
+			mover.frontalState = eShipAttackFrontalState.Engage;
+			mover.broadsideState = eShipAttackBroadsideState.Engage;
+			mover.targetId = -1;
+
+			mover.orders = new List<ShipOrder>();
+			for (int j = 0; j < myShips[i].GetNumberOfOrders(); ++j)
+			{
+				ShipOrder temp = myShips[i].GetOrder(j);
+				mover.orders.Add(new ShipOrder(temp.orderType, temp.targetType, temp.targetShip));
+			}
+
+			myMovers[i] = mover;
+		}
+	}
+
+	private float GetMaxSpeed(int aShipIndex)
+	{
+		Ship ship = myShips[aShipIndex];
+		if (ship.Group == null)
+		{
+			return ship.Speed;
+		}
+		float lowestSpeed = ship.Speed;
+		for (int i = 0; i < ship.Group.myGroup.Count; ++i)
+		{
+			float speed = ship.Group.myGroup[i].Speed;
+			if (speed < lowestSpeed)
+			{
+				lowestSpeed = speed;
+			}
+		}
+		return lowestSpeed;
+	}
+
+	float ticker = 0.0f;
+
+	void Update()
+	{
+		ticker += Time.deltaTime;
+		while (ticker > INTERNAL_DELTA_TIME)
+		{
+			Tick();
+			ticker -= INTERNAL_DELTA_TIME;
+		}
+	}
+
+	private void Tick()
+	{
+		for (int i = 0; i < myNumberOfShips; ++i)
+		{
+			if (myMovers[i].isAlive == false) continue;
+			UpdateMover(ref myMovers[i]);
+		}
+
+		for (int i = 0; i < myNumberOfShips; ++i)
+		{
+			if (myShips[i] != null && myMovers[i].isAlive == true)
+			{
+				if (myShips[i].IsDestroyed == false)
+				{
+					ShipMover mover = myMovers[i];
+					myShips[i].transform.position = mover.position;
+					myShips[i].transform.rotation = mover.rotation;
+					myShips[i].Velocity = mover.velocity;
+					myShips[i].SetTarget((mover.targetId != -1 && myMovers[mover.targetId].isAlive == true) ? myShips[mover.targetId] : null);
+				}
+				else
+				{
+					Explosion explosion = GameManager.Instance.GetExplosionPrefabByTeamIndex(myMovers[i].team).GetPooledInstance<Explosion>();
+					explosion.transform.position = myMovers[i].position;
+					explosion.Init(myShips[i].Data.size / 6.5f);
+
+					FindObjectOfType<GameManager>().FleetSizeUI.ShipDestroyed(myShips[i]);
+
+					myMovers[i].isAlive = false;
+					Destroy(myShips[i].gameObject);
+				}
+			}
+		}
+
+		for (int i = 0; i < myNumberOfShips; ++i)
+		{
+			if (myShips[i] != null && myShips[i].IsDestroyed == false && myShips[i].HasPointDefense == true)
+			{
+				HomingProjectile closest = null;
+				float closestDistance = float.MaxValue;
+				for (int j = 0; j < HomingProjectile.HomingProjectiles.Count; ++j)
+				{
+					float distance = (myShips[i].transform.position - HomingProjectile.HomingProjectiles[j].transform.position).magnitude;
+					if (distance < closestDistance)
+					{
+						closestDistance = distance;
+						closest = HomingProjectile.HomingProjectiles[j];
+					}
+				}
+				if (closest != null)
+				{
+					myShips[i].SetTarget(closest);
+				}
+			}
+		}
+	}
+
+	private void UpdateMover(ref ShipMover aMover)
+	{
+		aMover.stop = false;
+		if (aMover.orders.Count == 0)
+		{
+			aMover.order = eOrderType.Attack_Target;
+			UpdateAttack(ref aMover);
+		}
+		else
+		{
+			aMover.order = aMover.orders[0].orderType;
+			switch (aMover.order)
+			{
+				case eOrderType.None:
+					UpdatePassive(ref aMover);
+					break;
+
+				case eOrderType.Attack_Type:
+				case eOrderType.Attack_Target:
+				case eOrderType.CarrionTactic:
+				case eOrderType.Support:
+					UpdateAttack(ref aMover);
+					break;
+
+				case eOrderType.Broadside:
+					UpdateBroadside(ref aMover);
+					break;
+
+				case eOrderType.Protect_Target:
+					UpdateProtect(ref aMover);
+					break;
+
+				case eOrderType.Skirmish:
+					UpdateSkirmish(ref aMover);
+					break;
+
+				case eOrderType.Bombard:
+				case eOrderType.Assist_Target:
+					UpdateAttack(ref aMover);
+					break;
+
+				case eOrderType.Stop:
+					UpdateStop(ref aMover);
+					break;
+
+				default:
+					UpdatePassive(ref aMover);
+					break;
+			}
+		}
+
+		if (aMover.stop == false)
+		{
+			{
+				Vector3 delta = aMover.destination - aMover.position;
+				float distance = delta.magnitude;
+				float speed = aMover.maxSpeed * speedMultiplier;
+				if (distance < 20.0f)
+				{
+					float p = distance / 20.0f;
+					speed *= p;
+				}
+				aMover.velocity = (aMover.rotation * Vector3.forward) * speed;
+			}
+
+			{
+				Vector3 delta = aMover.destination - aMover.position;
+				Vector3 deltaNorm = delta.normalized;
+				Vector3 forward = aMover.velocity.normalized;
+				float anglesToTarget = Vector3.Angle(forward, deltaNorm);
+				float rotatePower = Mathf.Pow(anglesToTarget / 180.0f, 0.5f);
+				Vector3 rotation = Vector3.RotateTowards(forward, deltaNorm, aMover.turnSpeed * Mathf.Deg2Rad * INTERNAL_DELTA_TIME * rotatePower * aMover.turnSpeedMultiplier * turnMultiplier, 0.0f);
+				float angles = Vector3.Angle(forward, rotation);
+				float d = Vector3.Dot(transform.right, rotation);
+				aMover.velocity = rotation * aMover.velocity.magnitude;
+			}
+
+			//Vector3 delta = aMover.destination - aMover.position;
+			//delta.Normalize();
+			//float distanceToCenter = aMover.position.magnitude;
+			//float weightToCenter = distanceToCenter / centerThing;
+			//weightToCenter = 0;
+			//Vector3 targetDirection = aMover.position.normalized * -weightToCenter + delta * Mathf.Max(0.0f, 1.0f - weightToCenter);
+			//Vector3 steering = Vector3.RotateTowards(aMover.velocity != Vector3.zero ? aMover.velocity.normalized : aMover.rotation * Vector3.forward, targetDirection.normalized, aMover.turnSpeed * INTERNAL_DELTA_TIME * aMover.turnSpeedMultiplier * turnMultiplier, 0.0f);
+			//aMover.velocity += steering * aMover.acceleration * INTERNAL_DELTA_TIME;
+		}
+		else if (HasValidTarget(ref aMover) == true && aMover.velocity != Vector3.zero)
+		{
+			Vector3 delta = myMovers[aMover.targetId].position - aMover.position;
+			Vector3 steering = Vector3.RotateTowards(aMover.velocity.normalized, delta.normalized, aMover.turnSpeed * INTERNAL_DELTA_TIME * aMover.turnSpeedMultiplier * turnMultiplier, 0.0f);
+			aMover.velocity = steering * aMover.velocity.magnitude;
+		}
+
+		//if (aMover.velocity.sqrMagnitude > (aMover.maxSpeed * speedMultiplier) * (aMover.maxSpeed * speedMultiplier))
+		//{
+		//	aMover.velocity = aMover.velocity.normalized * aMover.maxSpeed * speedMultiplier;
+		//}
+		aMover.position += aMover.velocity * INTERNAL_DELTA_TIME;
+
+		if (aMover.velocity != Vector3.zero)
+		{
+			aMover.rotation = Quaternion.LookRotation(aMover.velocity.normalized, Vector3.up);
+		}
+		else if (HasValidTarget(ref aMover) == true)
+		{
+			Vector3 delta = myMovers[aMover.targetId].position - aMover.position;
+			aMover.rotation = Quaternion.LookRotation(Vector3.RotateTowards(aMover.rotation * Vector3.forward, delta.normalized, aMover.turnSpeed * INTERNAL_DELTA_TIME * aMover.turnSpeedMultiplier * turnMultiplier, 0.0f));
+		}
+	}
+
+	private void UpdatePassive(ref ShipMover aMover)
+	{
+		aMover.destination = aMover.position + aMover.rotation * Vector3.forward * 100.0f;
+		//aMover.velocity *= 0.95f;
+		//aMover.stop = true;
+	}
+
+	private void UpdateStop(ref ShipMover aMover)
+	{
+		aMover.velocity *= 0.95f;
+		aMover.stop = true;
+	}
+
+	private void UpdateAttack(ref ShipMover aMover)
+	{
+		if (HasValidTarget(ref aMover) == false || Random.Range(0, 100) == 0)
+		{
+			FindTarget(ref aMover);
+		}
+		if (HasValidTarget(ref aMover) == true)
+		{
+			if (aMover.frontalState == eShipAttackFrontalState.Engage)
+			{
+				aMover.destination = myMovers[aMover.targetId].position;
+				Vector3 delta = aMover.destination - aMover.position;
+				if (delta.sqrMagnitude < fallbackRadius * fallbackRadius)
+				{
+					aMover.frontalState = eShipAttackFrontalState.FallBack;
+				}
+			}
+			else if (aMover.frontalState == eShipAttackFrontalState.FallBack)
+			{
+				Vector3 delta = aMover.position - myMovers[aMover.targetId].position;
+				aMover.destination = aMover.position + delta;
+				aMover.turnSpeedMultiplier = 2.0f;
+				if (delta.sqrMagnitude > engageRadius * engageRadius)
+				{
+					aMover.frontalState = eShipAttackFrontalState.Engage;
+				}
+			}
+		}
+		else
+		{
+			UpdatePassive(ref aMover);
+		}
+	}
+
+	private void UpdateBroadside(ref ShipMover aMover)
+	{
+		if (HasValidTarget(ref aMover) == false || Random.Range(0, 100) == 0)
+		{
+			FindTarget(ref aMover);
+		}
+		if (HasValidTarget(ref aMover) == true)
+		{
+			Vector3 delta = myMovers[aMover.targetId].position - aMover.position;
+			Vector3 dir = -delta.normalized;
+			dir = Quaternion.Euler(0.0f, 90.0f, 0.0f) * dir;
+			aMover.destination = myMovers[aMover.targetId].position + dir * 100.0f;
+		}
+		else
+		{
+			UpdatePassive(ref aMover);
+		}
+	}
+
+	private void UpdateProtect(ref ShipMover aMover)
+	{
+		//if (HasValidTarget(ref aMover) == false || Random.Range(0, 100) == 0)
+		//{
+		//	FindTarget(ref aMover);
+		//}
+		//if (HasValidTarget(ref aMover) == true)
+		{
+			int escortId = System.Array.IndexOf(myShips, aMover.orders[0].targetShip);
+			bool validEscort = (escortId != -1 && escortId != aMover.id && myMovers[escortId].team == aMover.team && myMovers[escortId].isAlive == true);
+			if (validEscort == true)
+			{
+				if (aMover.orders[0].targetShip.LastAttacker != null)
+				{
+					UpdateAttack(ref aMover);
+				}
+				else
+				{
+					Vector3 delta = myMovers[escortId].position - aMover.position;
+					Vector3 dir = -delta.normalized;
+					dir = Quaternion.Euler(0.0f, 90.0f, 0.0f) * dir;
+					aMover.destination = myMovers[escortId].position + dir * 100.0f;
+				}
+			}
+			else
+			{
+				aMover.orders.RemoveAt(0);
+			}
+		}
+		//else
+		//{
+		//	UpdatePassive(ref aMover);
+		//}
+	}
+
+	private void UpdateSkirmish(ref ShipMover aMover)
+	{
+		if (HasValidTarget(ref aMover) == false || Random.Range(0, 100) == 0)
+		{
+			FindTarget(ref aMover);
+		}
+		if (HasValidTarget(ref aMover) == true)
+		{
+			Vector3 delta = myMovers[aMover.targetId].position - aMover.position;
+			float distance2 = delta.sqrMagnitude;
+			if (aMover.range > myMovers[aMover.targetId].range)
+			{
+				if (distance2 > aMover.range * aMover.range)
+				{
+					aMover.destination = myMovers[aMover.targetId].position;
+				}
+				else if (distance2 < myMovers[aMover.targetId].range * myMovers[aMover.targetId].range)
+				{
+					aMover.destination = aMover.position + (aMover.position - myMovers[aMover.targetId].position);
+				}
+				else
+				{
+					UpdateStop(ref aMover);
+				}
+			}
+			else
+			{
+				if (distance2 > aMover.range * aMover.range)
+				{
+					aMover.destination = myMovers[aMover.targetId].position;
+				}
+				else if (distance2 < (aMover.range * 0.5f) * (aMover.range * 0.5f))
+				{
+					aMover.destination = aMover.position + (aMover.position - myMovers[aMover.targetId].position);
+				}
+				else
+				{
+					UpdateStop(ref aMover);
+				}
+			}
+		}
+		else
+		{
+			UpdatePassive(ref aMover);
+		}
+	}
+
+	private bool HasValidTarget(ref ShipMover aMover)
+	{
+		return (aMover.targetId != -1 &&
+				aMover.targetId != aMover.id &&
+				myMovers[aMover.targetId].team != aMover.team &&
+				myMovers[aMover.targetId].isAlive == true);
+	}
+
+	private void FindTarget(ref ShipMover aMover)
+	{
+		aMover.targetId = -1;
+		if (aMover.order == eOrderType.Attack_Target || aMover.order == eOrderType.Attack_Type || aMover.order == eOrderType.Broadside
+			|| aMover.order == eOrderType.Skirmish
+			|| aMover.order == eOrderType.Assist_Target
+			|| aMover.order == eOrderType.Bombard
+			|| (aMover.order == eOrderType.Protect_Target && aMover.orders[0].targetShip != null && aMover.orders[0].targetShip.LastAttacker == null)
+			|| aMover.order == eOrderType.None)
+		{
+			int closestId = -1;
+			float closestDistance = float.MaxValue;
+			for (int i = 0; i < myNumberOfShips; ++i)
+			{
+				if (i == aMover.id) continue;
+				if (myMovers[i].team == aMover.team) continue;
+				if (myMovers[i].isAlive == false) continue;
+
+				float distance = (myMovers[i].position - aMover.position).magnitude;
+				if (distance < closestDistance && distance < engangementRange)
+				{
+					closestDistance = distance;
+					closestId = i;
+				}
+			}
+			aMover.targetId = closestId;
+		}
+		else if (aMover.order == eOrderType.CarrionTactic)
+		{
+			int lowestId = -1;
+			float lowestHealth = float.MaxValue;
+			for (int i = 0; i < myNumberOfShips; ++i)
+			{
+				if (i == aMover.id) continue;
+				if (myMovers[i].team == aMover.team) continue;
+				if (myMovers[i].isAlive == false) continue;
+
+				float distance = (myMovers[i].position - aMover.position).magnitude;
+				float health = myShips[i].Hull + myShips[i].Armour + myShips[i].Shield;
+				if (health < lowestHealth && distance < engangementRange)
+				{
+					lowestHealth = health;
+					lowestId = i;
+				}
+			}
+			aMover.targetId = lowestId;
+		}
+		else if (aMover.order == eOrderType.Support)
+		{
+			int highestId = -1;
+			float highestHealth = 0.0f;
+			for (int i = 0; i < myNumberOfShips; ++i)
+			{
+				if (i == aMover.id) continue;
+				if (myMovers[i].team == aMover.team) continue;
+				if (myMovers[i].isAlive == false) continue;
+
+				float distance = (myMovers[i].position - aMover.position).magnitude;
+				float health = myShips[i].Hull + myShips[i].Armour + myShips[i].Shield;
+				if (health > highestHealth && distance < engangementRange)
+				{
+					highestHealth = health;
+					highestId = i;
+				}
+			}
+			aMover.targetId = highestId;
+		}
+		else if (aMover.order == eOrderType.Protect_Target && aMover.orders[0].targetShip != null && aMover.orders[0].targetShip.LastAttacker != null)
+		{
+			aMover.targetId = System.Array.IndexOf(myShips, aMover.orders[0].targetShip.LastAttacker);
+		}
+	}
+
+	private void UpdateDefend(ref ShipMover aMover)
+	{ 
+		
+	}
+
+	void OnGUI()
+	{
+		if (Input.GetKey(KeyCode.Space) == false) return;
+		float iconSize = 16.0f;
+		Camera camera = Camera.main;
+		Rect rect = Rect.zero;
+		rect.width = iconSize;
+		rect.height = iconSize;
+		for (int i = 0; i < myNumberOfShips; ++i)
+		{
+			if (myMovers[i].isAlive == false) continue;
+
+			Vector3 delta = camera.transform.position - myMovers[i].position;
+			if (Vector3.Dot(camera.transform.forward, delta) > 0.0f) continue;
+			
+			Vector3 screenPosition = camera.WorldToScreenPoint(myMovers[i].position);
+			rect.x = screenPosition.x - (iconSize / 2);
+			rect.y = Screen.height - screenPosition.y - (iconSize / 2);
+			GUI.color = (myMovers[i].team == 0 ? Color.blue : Color.red);
+			Texture2D icon = shipIndicatorScreen;
+			if (myShips[i].Data.baseData.className == "Destroyer") icon = shipIndicatorDestroyer;
+			else if (myShips[i].Data.baseData.className == "Cruiser") icon = shipIndicatorBattle;
+			GUI.DrawTexture(rect, icon);
+		}
+	}
+
+	void OnDrawGizmos()
+	{
+		Gizmos.color = Color.red;
+		for (int i = 0; i < myNumberOfShips; ++i)
+		{
+			if (myMovers[i].isAlive == false) continue;
+			Gizmos.DrawSphere(myMovers[i].destination, 1.0f);
+		}
+	}
+}
